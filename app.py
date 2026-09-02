@@ -51,19 +51,32 @@ def delete_book(book_id: int):
     conn.close()
 
 
+def reset_database():
+    conn = get_connection()
+    conn.execute("DELETE FROM books")
+    conn.commit()
+    conn.close()
+
+
 def import_excel(file, has_header: bool):
-    """Reads an Excel file with two columns (author, title) and inserts rows into the DB."""
+    """Reads an Excel file with two columns (author, title) and inserts new rows into the DB.
+    Rows matching an existing (author, title) pair are skipped to avoid duplicates."""
     header_arg = 0 if has_header else None
     df = pd.read_excel(file, header=header_arg)
     df = df.iloc[:, :2]
     df.columns = ["author", "title"]
     df = df.dropna(how="all")
+    df["author"] = df["author"].astype(str).str.strip()
+    df["title"] = df["title"].astype(str).str.strip()
+
+    existing = get_all_books()
+    existing_pairs = set(zip(existing["author"], existing["title"]))
+    df = df[~df.apply(lambda r: (r["author"], r["title"]) in existing_pairs, axis=1)]
 
     conn = get_connection()
-    df.to_sql("books_import_tmp", conn, if_exists="replace", index=False)
-    conn.execute("INSERT INTO books (author, title) SELECT author, title FROM books_import_tmp")
-    conn.execute("DROP TABLE books_import_tmp")
-    conn.commit()
+    if not df.empty:
+        df.to_sql("books", conn, if_exists="append", index=False)
+        conn.commit()
     conn.close()
     return len(df)
 
@@ -75,9 +88,21 @@ def book_count() -> int:
     return count
 
 
+def load_seed_if_empty():
+    """On a fresh/reset database, auto-import books_seed.csv if it exists next to app.py."""
+    seed_path = Path(__file__).parent / "books_seed.csv"
+    if book_count() == 0 and seed_path.exists():
+        df = pd.read_csv(seed_path)
+        conn = get_connection()
+        df.to_sql("books", conn, if_exists="append", index=False)
+        conn.commit()
+        conn.close()
+
+
 # ---------- App ----------
 
 init_db()
+load_seed_if_empty()
 
 st.title("📚 My Library")
 
@@ -92,6 +117,22 @@ with st.sidebar:
             n = import_excel(uploaded_file, has_header)
             st.success(f"Imported {n} books.")
             st.rerun()
+
+    st.divider()
+    st.header("⚠️ Reset database")
+    st.caption("Deletes every book. Use this if an import got duplicated.")
+    confirm_reset = st.checkbox("I understand this deletes everything")
+    if st.button("Reset database", disabled=not confirm_reset):
+        reset_database()
+        st.success("Database cleared.")
+        st.rerun()
+
+    st.divider()
+    st.header("Backup your library")
+    st.caption("Download this whenever you add books, then re-upload it to GitHub as books_seed.csv so it survives restarts.")
+    if not get_all_books().empty:
+        csv_data = get_all_books()[["author", "title"]].to_csv(index=False)
+        st.download_button("Download as books_seed.csv", csv_data, file_name="books_seed.csv", mime="text/csv")
 
     st.divider()
     st.header("Add a book manually")
